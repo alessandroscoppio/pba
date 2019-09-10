@@ -32,10 +32,29 @@ svhn_search() {
     --lr 0.1 --wd 0.005
 }
 
+mainblades_search() {
+    local_dir="$PWD/results/"
+    data_path="$PWD/datasets/"
+
+    python pba/search.py \
+    --local_dir "$local_dir" --data_path "$data_path" \
+    --model_name wrn_40_2 --dataset mainblades \
+    --recompute_dset_stats \
+    --train_size 60 --val_size 30 \
+    --bs 32
+    --checkpoint_freq 0 \
+    --name "mainblades_search" --gpu 0.8 --cpu 10 \
+    --num_samples 10 --perturbation_interval 3 --epochs 50 \
+    --explore cifar10 --aug_policy cifar10 \
+    --lr 0.1 --wd 0.005
+}
+
 if [ "$1" = "rcifar10" ]; then
     cifar10_search
 elif [ "$1" = "rsvhn" ]; then
     svhn_search
+elif [ "$1" = "mainblades" ]; then
+    mainblades_search
 else
     echo "invalid args"
 fi

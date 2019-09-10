@@ -19,6 +19,11 @@ from __future__ import division
 from __future__ import print_function
 
 import copy
+
+import yaml
+import pprint
+
+
 try:
     import cPickle as pickle
 except:
@@ -34,7 +39,8 @@ import pba.policies as found_policies
 from pba.utils import parse_log_schedule
 import pba.augmentation_transforms_hp as augmentation_transforms_pba
 import pba.augmentation_transforms as augmentation_transforms_autoaug
-
+import multiprocessing as mp
+import image_recognition as ir
 
 # pylint:disable=logging-format-interpolation
 
@@ -298,6 +304,82 @@ class DataSet(object):
         self.val_labels = np.random.randint(0, self.num_classes, (hparams.validation_size))
         self.test_labels = np.random.randint(0, self.num_classes, (test_size))
 
+    def load_mainblades(self, hparams):
+        """Load mainblades dataset."""
+
+        tf.enable_eager_execution()
+        NUM_CORES = mp.cpu_count()
+
+        # yaml file with dataset info
+        preprocessing_results_file = "gs://tim-bergling/preprocessing/2019-03-16_1867_multilabel_preprocessing_results_v2.yaml"
+        preprocessing_results = yaml.load(ir.utils.read_write_utils.open_gcs_file(preprocessing_results_file))
+
+        n_train = preprocessing_results["classification"]["n_train"]
+        n_val = preprocessing_results["classification"]["n_val"]
+        n_test = preprocessing_results["classification"]["n_test"]
+
+        n_classes = len(preprocessing_results["classification"]["valid_classes"])
+        label_map = preprocessing_results["classification"]["label_map"]
+        category_str_map = preprocessing_results["classification"]["category_str_map"]
+
+        # TFrecord name for train val and test
+        filename = {"train": preprocessing_results["classification"]["train_tfrecord"],
+                    "val": preprocessing_results["classification"]["val_tfrecord"],
+                    "test": preprocessing_results["classification"]["test_tfrecord"]}
+
+        # read
+        ds_reader = ir.utils.read_write_utils.DatasetReader(
+            path="gs://tim-bergling/datasets/DIV2K/random/2019-05-31_DIV2K_train.tfrecord_0",
+            problem_type="multilabel_classification")
+        data = ds_reader.read_from_tfrecord()
+
+        # define size of crop
+        square_size = 100
+        crop_size = [square_size, square_size]
+        # decode dataset
+        data = data.map(ir.utils.read_write_utils.decode_image_map_func, num_parallel_calls=NUM_CORES)
+        data = {}
+        for ds_type in ["train", "val", "test"]:
+            ds_reader = ir.utils.read_write_utils.DatasetReader(filename[ds_type], problem_type="multilabel_classification")
+            data[ds_type] = ds_reader.read_from_tfrecord(shuffle=False, shuffle_buffer=n_test, seed=69).map(
+                ir.utils.read_write_utils.decode_image_map_func, num_parallel_calls=NUM_CORES)
+            data[ds_type] = data[ds_type].map(lambda el: ir.train.augment.resize_map_func(el, mode="crop", output_size=crop_size),
+                                    num_parallel_calls=NUM_CORES)
+        train_imgs = []
+        train_lbls = []
+        test_imgs = []
+        test_lbls = []
+        val_imgs = []
+        val_lbls = []
+
+        test_size = 20
+
+        # width = data["train"].take(1)["image/decoded"].numpy().shape #TODO: assess automatically the size of the image
+
+        for element in data["train"].take(hparams.train_size):
+            train_imgs.append(element["image/decoded"].numpy())
+            train_lbls.append(element["image/class/label"].numpy())
+
+        for element in data["test"].take(test_size):
+            test_imgs.append(element["image/decoded"].numpy())
+            test_lbls.append(element["image/class/label"].numpy())
+
+        for element in data["val"].take(hparams.validation_size):
+            val_imgs.append(element["image/decoded"].numpy())
+            val_lbls.append(element["image/class/label"].numpy())
+
+        # Assumes data is in NCHW format.
+
+        tf.disable_eager_execution()
+
+        self.train_images = np.reshape(train_imgs, [hparams.train_size, 3, square_size, square_size])
+        self.train_labels = train_lbls
+        self.test_images = np.reshape(test_imgs, [test_size, 3, square_size, square_size])
+        self.test_labels = test_lbls
+        self.val_images = np.reshape(val_imgs, [hparams.validation_size, 3, square_size, square_size])
+        self.val_labels = val_lbls
+        self.num_classes = n_classes
+
     def load_data(self, hparams):
         """Load raw data from specified dataset.
 
@@ -323,6 +405,8 @@ class DataSet(object):
             self.load_svhn(hparams)
         elif hparams.dataset == 'test':
             self.load_test(hparams)
+        elif hparams.dataset == 'mainblades' or 'r-mainblades':
+            self.load_mainblades(hparams)
         else:
             raise ValueError('unimplemented')
 
@@ -337,7 +421,7 @@ class DataSet(object):
         assert len(self.train_images) == len(self.train_labels)
         assert len(self.val_images) == len(self.val_labels)
         assert len(self.test_images) == len(self.test_labels)
-        assert self.train_images.shape[2] == self.train_images.shape[3]
+        # assert self.train_images.shape[2] == self.train_images.shape[3]
 
     def next_batch(self, iteration=None):
         """Return the next minibatch of augmented data."""
